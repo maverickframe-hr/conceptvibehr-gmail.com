@@ -141,10 +141,10 @@ async def vacancies(provider_name: str, employer_id: Optional[str] = None, page:
     if not employer_id:
         me_data = await api_request(provider_name, "GET", "/me")
 
-    if provider_name == "rabota":
-        employer = me_data.get("employer")
-        if not employer:
-            raise HTTPException(
+        if provider_name == "rabota":
+            employer = me_data.get("employer")
+            if not employer:
+                    raise HTTPException(
                 status_code=400,
                 detail="No employer account found for this rabota user."
             )
