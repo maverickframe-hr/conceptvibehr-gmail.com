@@ -1,26 +1,20 @@
 openapi: 3.1.0
 info:
-  title: Maverickframe HH MVP Bridge
-  version: 0.1.0
+  title: Maverickframe HR Bridge
+  version: 0.2.0
 servers:
-  - url: https://YOUR-RENDER-SERVICE.onrender.com
+  - url: https://maverickframe-hh-bridge.onrender.com
 paths:
-  /health:
-    get:
-      operationId: health
-      summary: Check service health
-      responses:
-        '200': { description: OK }
   /hh/me:
     get:
       operationId: getHHMe
-      summary: Get current HH user and employer accounts
+      summary: Get current HH API user
       responses:
-        '200': { description: Current HH user }
+        '200': { description: OK }
   /hh/vacancies:
     get:
-      operationId: listHHVacancies
-      summary: List employer vacancies from HH
+      operationId: getHHVacancies
+      summary: Get HH employer vacancies
       parameters:
         - name: employer_id
           in: query
@@ -35,11 +29,11 @@ paths:
           required: false
           schema: { type: integer, default: 20 }
       responses:
-        '200': { description: Vacancies }
+        '200': { description: OK }
   /hh/negotiations:
     get:
-      operationId: listHHNegotiations
-      summary: List responses/negotiations for an HH vacancy
+      operationId: getHHNegotiations
+      summary: Get HH vacancy responses/negotiations
       parameters:
         - name: vacancy_id
           in: query
@@ -54,21 +48,54 @@ paths:
           required: false
           schema: { type: integer, default: 20 }
       responses:
-        '200': { description: Negotiations }
-  /hh/resume/{resume_id}:
+        '200': { description: OK }
+  /rabota/me:
     get:
-      operationId: getHHResume
-      summary: Get an HH resume available to the employer
+      operationId: getRabotaMe
+      summary: Get current Rabota.by API user
+      responses:
+        '200': { description: OK }
+  /rabota/vacancies:
+    get:
+      operationId: getRabotaVacancies
+      summary: Get Rabota.by employer vacancies
       parameters:
-        - name: resume_id
-          in: path
+        - name: employer_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+        - name: per_page
+          in: query
+          required: false
+          schema: { type: integer, default: 20 }
+      responses:
+        '200': { description: OK }
+  /rabota/negotiations:
+    get:
+      operationId: getRabotaNegotiations
+      summary: Get Rabota.by vacancy responses/negotiations
+      parameters:
+        - name: vacancy_id
+          in: query
           required: true
           schema: { type: string }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+        - name: per_page
+          in: query
+          required: false
+          schema: { type: integer, default: 20 }
       responses:
-        '200': { description: Resume }
+        '200': { description: OK }
   /sheets/save_candidate:
     post:
-      operationId: saveCandidateToSheet
+      operationId: saveCandidateToSheets
       summary: Save selected candidate to Google Sheets
       requestBody:
         required: true
@@ -91,4 +118,4 @@ paths:
                 suggested_reply: { type: string }
                 gpt_summary: { type: string }
       responses:
-        '200': { description: Saved }
+        '200': { description: OK }

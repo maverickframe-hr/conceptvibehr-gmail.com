@@ -5,17 +5,41 @@ from typing import Optional, Any, Dict
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-APP_NAME = "Maverickframe HH MVP Bridge"
-HH_API = "https://api.hh.ru"
-HH_AUTH = "https://hh.ru/oauth/authorize"
-HH_TOKEN = "https://api.hh.ru/token"
-TOKEN_FILE = Path("/tmp/hh_tokens.json")
+APP_NAME = "Maverickframe HH + Rabota.by MVP Bridge"
+TOKEN_DIR = Path("/tmp")
 
-app = FastAPI(title=APP_NAME, version="0.1.0")
+PROVIDERS = {
+    "hh": {
+        "api": os.getenv("HH_API_URL", "https://api.hh.ru"),
+        "auth": os.getenv("HH_AUTH_URL", "https://hh.ru/oauth/authorize"),
+        "token": os.getenv("HH_TOKEN_URL", "https://api.hh.ru/token"),
+        "client_id": "HH_CLIENT_ID",
+        "client_secret": "HH_CLIENT_SECRET",
+        "redirect_uri": "HH_REDIRECT_URI",
+        "user_agent": "HH_USER_AGENT",
+        "default_ua": "Maverickframe HR Assistant (conceptvibehr@gmail.com)",
+        "token_file": TOKEN_DIR / "hh_tokens.json",
+        "source": "HH",
+    },
+    "rabota": {
+        "api": os.getenv("RABOTA_API_URL", "https://api.hh.ru"),
+        "auth": os.getenv("RABOTA_AUTH_URL", "https://rabota.by/oauth/authorize"),
+        "token": os.getenv("RABOTA_TOKEN_URL", "https://api.hh.ru/token"),
+        "client_id": "RABOTA_CLIENT_ID",
+        "client_secret": "RABOTA_CLIENT_SECRET",
+        "redirect_uri": "RABOTA_REDIRECT_URI",
+        "user_agent": "RABOTA_USER_AGENT",
+        "default_ua": "Maverickframe HR Assistant (conceptvibehr@gmail.com)",
+        "token_file": TOKEN_DIR / "rabota_tokens.json",
+        "source": "Rabota.by",
+    },
+}
+
+app = FastAPI(title=APP_NAME, version="0.2.0")
 
 
 def env(name: str, required: bool = True) -> Optional[str]:
@@ -25,25 +49,33 @@ def env(name: str, required: bool = True) -> Optional[str]:
     return value
 
 
-def save_tokens(tokens: Dict[str, Any]) -> None:
-    TOKEN_FILE.write_text(json.dumps(tokens, ensure_ascii=False), encoding="utf-8")
+def provider(name: str) -> Dict[str, Any]:
+    if name not in PROVIDERS:
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {name}")
+    return PROVIDERS[name]
 
 
-def load_tokens() -> Dict[str, Any]:
-    if not TOKEN_FILE.exists():
-        raise HTTPException(status_code=401, detail="HH is not authorized yet. Open /auth/hh/start first.")
-    return json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
+def save_tokens(provider_name: str, tokens: Dict[str, Any]) -> None:
+    provider(provider_name)["token_file"].write_text(json.dumps(tokens, ensure_ascii=False), encoding="utf-8")
 
 
-async def hh_request(method: str, path: str, **kwargs):
-    tokens = load_tokens()
+def load_tokens(provider_name: str) -> Dict[str, Any]:
+    token_file = provider(provider_name)["token_file"]
+    if not token_file.exists():
+        raise HTTPException(status_code=401, detail=f"{provider_name} is not authorized yet. Open /auth/{provider_name}/start first.")
+    return json.loads(token_file.read_text(encoding="utf-8"))
+
+
+async def api_request(provider_name: str, method: str, path: str, **kwargs):
+    p = provider(provider_name)
+    tokens = load_tokens(provider_name)
     headers = kwargs.pop("headers", {})
     headers.update({
         "Authorization": f"Bearer {tokens['access_token']}",
-        "HH-User-Agent": env("HH_USER_AGENT", required=False) or "Maverickframe HR Assistant (conceptvibehr@gmail.com)",
+        "HH-User-Agent": env(p["user_agent"], required=False) or p["default_ua"],
     })
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.request(method, f"{HH_API}{path}", headers=headers, **kwargs)
+        response = await client.request(method, f"{p['api']}{path}", headers=headers, **kwargs)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     return response.json()
@@ -51,7 +83,14 @@ async def hh_request(method: str, path: str, **kwargs):
 
 @app.get("/")
 def root():
-    return {"ok": True, "service": APP_NAME, "next": "/auth/hh/start"}
+    return {
+        "ok": True,
+        "service": APP_NAME,
+        "hh_start": "/auth/hh/start",
+        "rabota_start": "/auth/rabota/start",
+        "hh_me": "/hh/me",
+        "rabota_me": "/rabota/me",
+    }
 
 
 @app.get("/health")
@@ -59,66 +98,67 @@ def health():
     return {"ok": True}
 
 
-@app.get("/auth/hh/start")
-def hh_start():
-    client_id = env("HH_CLIENT_ID")
-    redirect_uri = env("HH_REDIRECT_URI")
+@app.get("/auth/{provider_name}/start")
+def auth_start(provider_name: str):
+    p = provider(provider_name)
     params = urlencode({
         "response_type": "code",
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
+        "client_id": env(p["client_id"]),
+        "redirect_uri": env(p["redirect_uri"]),
     })
-    return RedirectResponse(f"{HH_AUTH}?{params}")
+    return RedirectResponse(f"{p['auth']}?{params}")
 
 
-@app.get("/auth/hh/callback")
-async def hh_callback(code: str):
-    client_id = env("HH_CLIENT_ID")
-    client_secret = env("HH_CLIENT_SECRET")
-    redirect_uri = env("HH_REDIRECT_URI")
+@app.get("/auth/{provider_name}/callback")
+async def auth_callback(provider_name: str, code: str):
+    p = provider(provider_name)
     data = {
         "grant_type": "authorization_code",
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "redirect_uri": redirect_uri,
+        "client_id": env(p["client_id"]),
+        "client_secret": env(p["client_secret"]),
+        "redirect_uri": env(p["redirect_uri"]),
         "code": code,
     }
-    headers = {"HH-User-Agent": env("HH_USER_AGENT", required=False) or "Maverickframe HR Assistant (conceptvibehr@gmail.com)"}
+    headers = {"HH-User-Agent": env(p["user_agent"], required=False) or p["default_ua"]}
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(HH_TOKEN, data=data, headers=headers)
+        response = await client.post(p["token"], data=data, headers=headers)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     tokens = response.json()
-    save_tokens(tokens)
-    return {"ok": True, "message": "HH authorized successfully. You can now use /hh/me and /hh/vacancies."}
+    save_tokens(provider_name, tokens)
+    return {"ok": True, "message": f"{provider_name} authorized successfully. You can now use /{provider_name}/me and /{provider_name}/vacancies."}
 
 
-@app.get("/hh/me")
-async def hh_me():
-    return await hh_request("GET", "/me")
+@app.get("/{provider_name}/me")
+async def me(provider_name: str):
+    provider(provider_name)
+    return await api_request(provider_name, "GET", "/me")
 
 
-@app.get("/hh/vacancies")
-async def hh_vacancies(employer_id: Optional[str] = None, page: int = 0, per_page: int = 20):
+@app.get("/{provider_name}/vacancies")
+async def vacancies(provider_name: str, employer_id: Optional[str] = None, page: int = 0, per_page: int = 20):
+    provider(provider_name)
     if not employer_id:
-        me = await hh_request("GET", "/me")
-        employers = me.get("employers") or []
+        me_data = await api_request(provider_name, "GET", "/me")
+        employers = me_data.get("employers") or []
         if not employers:
-            raise HTTPException(status_code=400, detail="No employer accounts found for this HH user.")
+            raise HTTPException(status_code=400, detail=f"No employer accounts found for this {provider_name} user.")
         employer_id = employers[0].get("id")
     params = {"page": page, "per_page": per_page}
-    return await hh_request("GET", f"/employers/{employer_id}/vacancies", params=params)
+    return await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies", params=params)
 
 
-@app.get("/hh/negotiations")
-async def hh_negotiations(vacancy_id: str, page: int = 0, per_page: int = 20):
+@app.get("/{provider_name}/negotiations")
+async def negotiations(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20):
+    provider(provider_name)
     params = {"vacancy_id": vacancy_id, "page": page, "per_page": per_page}
-    return await hh_request("GET", "/negotiations", params=params)
+    return await api_request(provider_name, "GET", "/negotiations", params=params)
 
 
-@app.get("/hh/resume/{resume_id}")
-async def hh_resume(resume_id: str):
-    return await hh_request("GET", f"/resumes/{resume_id}")
+@app.get("/{provider_name}/resume/{resume_id}")
+async def resume(provider_name: str, resume_id: str):
+    provider(provider_name)
+    return await api_request(provider_name, "GET", f"/resumes/{resume_id}")
 
 
 class CandidateRow(BaseModel):
