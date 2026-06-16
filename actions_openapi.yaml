@@ -1,0 +1,94 @@
+openapi: 3.1.0
+info:
+  title: Maverickframe HH MVP Bridge
+  version: 0.1.0
+servers:
+  - url: https://YOUR-RENDER-SERVICE.onrender.com
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Check service health
+      responses:
+        '200': { description: OK }
+  /hh/me:
+    get:
+      operationId: getHHMe
+      summary: Get current HH user and employer accounts
+      responses:
+        '200': { description: Current HH user }
+  /hh/vacancies:
+    get:
+      operationId: listHHVacancies
+      summary: List employer vacancies from HH
+      parameters:
+        - name: employer_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+        - name: per_page
+          in: query
+          required: false
+          schema: { type: integer, default: 20 }
+      responses:
+        '200': { description: Vacancies }
+  /hh/negotiations:
+    get:
+      operationId: listHHNegotiations
+      summary: List responses/negotiations for an HH vacancy
+      parameters:
+        - name: vacancy_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+        - name: per_page
+          in: query
+          required: false
+          schema: { type: integer, default: 20 }
+      responses:
+        '200': { description: Negotiations }
+  /hh/resume/{resume_id}:
+    get:
+      operationId: getHHResume
+      summary: Get an HH resume available to the employer
+      parameters:
+        - name: resume_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Resume }
+  /sheets/save_candidate:
+    post:
+      operationId: saveCandidateToSheet
+      summary: Save selected candidate to Google Sheets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date_added: { type: string }
+                source: { type: string }
+                vacancy: { type: string }
+                candidate_name: { type: string }
+                location: { type: string }
+                experience: { type: string }
+                skills: { type: string }
+                gpt_score: { type: integer }
+                status: { type: string }
+                recruiter_comment: { type: string }
+                resume_link: { type: string }
+                suggested_reply: { type: string }
+                gpt_summary: { type: string }
+      responses:
+        '200': { description: Saved }
