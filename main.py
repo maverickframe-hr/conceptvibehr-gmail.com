@@ -140,16 +140,23 @@ async def vacancies(provider_name: str, employer_id: Optional[str] = None, page:
     provider(provider_name)
     if not employer_id:
         me_data = await api_request(provider_name, "GET", "/me")
-        f provider_name == "rabota":
-    employer = me_data.get("employer")
-    if not employer:
-        raise HTTPException(status_code=400, detail="No employer account found for this rabota user.")
-    employer_id = employer.get("id")
-else:
-    employers = me_data.get("employers") or []
-    if not employers:
-        raise HTTPException(status_code=400, detail=f"No employer accounts found for this {provider_name} user.")
-    employer_id = employers[0].get("id")
+
+    if provider_name == "rabota":
+        employer = me_data.get("employer")
+        if not employer:
+            raise HTTPException(
+                status_code=400,
+                detail="No employer account found for this rabota user."
+            )
+        employer_id = employer.get("id")
+    else:
+        employers = me_data.get("employers") or []
+        if not employers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No employer accounts found for this {provider_name} user."
+            )
+        employer_id = employers[0].get("id")
     params = {"page": page, "per_page": per_page}
     return await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies", params=params)
 
