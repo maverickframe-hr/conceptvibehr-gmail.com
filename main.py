@@ -144,28 +144,34 @@ async def vacancies(provider_name: str, employer_id: Optional[str] = None, page:
         if provider_name == "rabota":
             employer = me_data.get("employer")
             if not employer:
-                    raise HTTPException(
-                status_code=400,
-                detail="No employer account found for this rabota user."
-            )
-        employer_id = employer.get("id")
-    else:
-        employers = me_data.get("employers") or []
-        if not employers:
-            raise HTTPException(
-                status_code=400,
-                detail=f"No employer accounts found for this {provider_name} user."
-            )
-        employer_id = employers[0].get("id")
+                raise HTTPException(status_code=400, detail="No employer account found for this rabota user.")
+            employer_id = employer.get("id")
+        else:
+            employers = me_data.get("employers") or []
+            if not employers:
+                raise HTTPException(status_code=400, detail=f"No employer accounts found for this {provider_name} user.")
+            employer_id = employers[0].get("id")
+
+    if provider_name == "rabota":
+        params = {"employer_id": employer_id, "page": page, "per_page": per_page}
+        return await api_request(provider_name, "GET", "/vacancies", params=params)
+
     params = {"page": page, "per_page": per_page}
-    params = {"employer_id": employer_id, "page": page, "per_page": per_page}
-    return await api_request(provider_name, "GET", "/vacancies", params=params)
+    return await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies", params=params)
+
 
 @app.get("/{provider_name}/negotiations")
 async def negotiations(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20):
     provider(provider_name)
     params = {"vacancy_id": vacancy_id, "page": page, "per_page": per_page}
     return await api_request(provider_name, "GET", "/negotiations", params=params)
+
+
+@app.get("/{provider_name}/responses")
+async def responses(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20):
+    provider(provider_name)
+    params = {"vacancy_id": vacancy_id, "page": page, "per_page": per_page}
+    return await api_request(provider_name, "GET", "/negotiations/response", params=params)
 
 
 @app.get("/{provider_name}/resume/{resume_id}")
