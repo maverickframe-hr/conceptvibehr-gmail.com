@@ -158,8 +158,8 @@ async def vacancies(provider_name: str, employer_id: Optional[str] = None, page:
             )
         employer_id = employers[0].get("id")
     params = {"page": page, "per_page": per_page}
-    return await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies", params=params)
-
+    params = {"employer_id": employer_id, "page": page, "per_page": per_page}
+    return await api_request(provider_name, "GET", "/vacancies", params=params)
 
 @app.get("/{provider_name}/negotiations")
 async def negotiations(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20):
