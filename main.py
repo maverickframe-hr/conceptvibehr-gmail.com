@@ -242,11 +242,24 @@ class CandidateRow(BaseModel):
 @app.post("/sheets/save_candidate")
 async def save_candidate(row: CandidateRow):
     url = env("GOOGLE_APPS_SCRIPT_URL")
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(url, json=row.model_dump())
+
+    async with httpx.AsyncClient(
+        timeout=30,
+        follow_redirects=True
+    ) as client:
+        response = await client.post(
+            url,
+            json=row.model_dump()
+        )
+
     if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-    try:
-        return response.json()
-    except Exception:
-        return {"ok": True, "response": response.text}
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.text
+        )
+
+    return {
+        "ok": True,
+        "status_code": response.status_code,
+        "response": response.text
+    }
