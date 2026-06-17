@@ -12,6 +12,10 @@ from pydantic import BaseModel
 APP_NAME = "Maverickframe HH + Rabota.by MVP Bridge"
 TOKEN_DIR = Path("/tmp")
 
+
+def token_store_url() -> Optional[str]:
+    return os.getenv("TOKEN_STORE_URL") or os.getenv("GOOGLE_APPS_SCRIPT_URL")
+
 PROVIDERS = {
     "hh": {
         "api": os.getenv("HH_API_URL", "https://api.hh.ru"),
@@ -55,20 +59,59 @@ def provider(name: str) -> Dict[str, Any]:
     return PROVIDERS[name]
 
 
-def save_tokens(provider_name: str, tokens: Dict[str, Any]) -> None:
+async def save_tokens_remote(provider_name: str, tokens: Dict[str, Any]) -> None:
+    url = token_store_url()
+    if not url:
+        return
+    payload = {"action": "save_token", "provider": provider_name, "tokens": tokens}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload)
+        if response.status_code >= 400:
+            print(f"Token remote save failed for {provider_name}: {response.status_code} {response.text}")
+    except Exception as exc:
+        print(f"Token remote save error for {provider_name}: {exc}")
+
+
+async def load_tokens_remote(provider_name: str) -> Optional[Dict[str, Any]]:
+    url = token_store_url()
+    if not url:
+        return None
+    payload = {"action": "load_token", "provider": provider_name}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload)
+        if response.status_code >= 400:
+            print(f"Token remote load failed for {provider_name}: {response.status_code} {response.text}")
+            return None
+        data = response.json()
+        tokens = data.get("tokens")
+        if isinstance(tokens, dict) and tokens.get("access_token"):
+            provider(provider_name)["token_file"].write_text(json.dumps(tokens, ensure_ascii=False), encoding="utf-8")
+            return tokens
+    except Exception as exc:
+        print(f"Token remote load error for {provider_name}: {exc}")
+    return None
+
+
+async def save_tokens(provider_name: str, tokens: Dict[str, Any]) -> None:
     provider(provider_name)["token_file"].write_text(json.dumps(tokens, ensure_ascii=False), encoding="utf-8")
+    await save_tokens_remote(provider_name, tokens)
 
 
-def load_tokens(provider_name: str) -> Dict[str, Any]:
+async def load_tokens(provider_name: str) -> Dict[str, Any]:
     token_file = provider(provider_name)["token_file"]
-    if not token_file.exists():
-        raise HTTPException(status_code=401, detail=f"{provider_name} is not authorized yet. Open /auth/{provider_name}/start first.")
-    return json.loads(token_file.read_text(encoding="utf-8"))
+    if token_file.exists():
+        return json.loads(token_file.read_text(encoding="utf-8"))
+    remote_tokens = await load_tokens_remote(provider_name)
+    if remote_tokens:
+        return remote_tokens
+    raise HTTPException(status_code=401, detail=f"{provider_name} is not authorized yet. Open /auth/{provider_name}/start first.")
 
 
 async def api_request(provider_name: str, method: str, path: str, **kwargs):
     p = provider(provider_name)
-    tokens = load_tokens(provider_name)
+    tokens = await load_tokens(provider_name)
     headers = kwargs.pop("headers", {})
     headers.update({
         "Authorization": f"Bearer {tokens['access_token']}",
@@ -125,7 +168,7 @@ async def auth_callback(provider_name: str, code: str):
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     tokens = response.json()
-    save_tokens(provider_name, tokens)
+    await save_tokens(provider_name, tokens)
     return {"ok": True, "message": f"{provider_name} authorized successfully. You can now use /{provider_name}/me and /{provider_name}/vacancies."}
 
 
