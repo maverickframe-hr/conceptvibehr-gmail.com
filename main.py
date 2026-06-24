@@ -70,6 +70,29 @@ def _safe_json(response: httpx.Response) -> Dict[str, Any]:
         return {"ok": False, "text": response.text[:2000]}
 
 
+async def apps_script_post_json(url: str, payload: Dict[str, Any]) -> tuple[int, Dict[str, Any], str]:
+    """Post JSON to Google Apps Script while preserving POST across Google's 302 redirect.
+
+    Google Web Apps often respond to /exec POST with 302 to script.googleusercontent.com.
+    httpx follow_redirects=True may convert POST to GET, so doPost never receives the body.
+    This helper follows redirects manually by POSTing the same JSON to the Location URL.
+    """
+    current_url = url
+    last_text = ""
+    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+        for _ in range(5):
+            response = await client.post(current_url, json=payload)
+            last_text = response.text
+            if response.status_code in (301, 302, 303, 307, 308):
+                location = response.headers.get("location")
+                if not location:
+                    return response.status_code, {"ok": False, "error": "redirect without location", "text": last_text[:1000]}, last_text
+                current_url = str(response.url.join(location))
+                continue
+            return response.status_code, _safe_json(response), last_text
+    return 599, {"ok": False, "error": "too many redirects", "text": last_text[:1000]}, last_text
+
+
 async def save_tokens_remote(provider_name: str, tokens: Dict[str, Any]) -> bool:
     url = token_store_url()
     if not url:
@@ -77,11 +100,9 @@ async def save_tokens_remote(provider_name: str, tokens: Dict[str, Any]) -> bool
         return False
     payload = {"action": "save_token", "provider": provider_name, "tokens": tokens}
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.post(url, json=payload)
-        data = _safe_json(response)
-        if response.status_code >= 400 or data.get("ok") is False:
-            print(f"Token remote save failed for {provider_name}: {response.status_code} {data}")
+        status_code, data, _text = await apps_script_post_json(url, payload)
+        if status_code >= 400 or data.get("ok") is False or data.get("saved") is not True:
+            print(f"Token remote save failed for {provider_name}: {status_code} {data}")
             return False
         return True
     except Exception as exc:
@@ -94,17 +115,15 @@ async def load_tokens_remote(provider_name: str) -> Optional[Dict[str, Any]]:
     if not url:
         return None
 
-    # Primary method: POST JSON to Apps Script doPost.
+    # Primary method: POST JSON to Apps Script doPost, preserving POST across Google's 302 redirect.
     payload = {"action": "load_token", "provider": provider_name}
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.post(url, json=payload)
-        data = _safe_json(response)
+        status_code, data, _text = await apps_script_post_json(url, payload)
         tokens = data.get("tokens") if isinstance(data, dict) else None
         if isinstance(tokens, dict) and tokens.get("access_token"):
             provider(provider_name)["token_file"].write_text(json.dumps(tokens, ensure_ascii=False), encoding="utf-8")
             return tokens
-        print(f"Token remote POST load did not return token for {provider_name}: {response.status_code} {data}")
+        print(f"Token remote POST load did not return token for {provider_name}: {status_code} {data}")
     except Exception as exc:
         print(f"Token remote POST load error for {provider_name}: {exc}")
 
@@ -384,19 +403,17 @@ class CandidateRow(BaseModel):
 @app.post("/sheets/save_candidate")
 async def save_candidate(row: CandidateRow):
     url = env("GOOGLE_APPS_SCRIPT_URL")
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        response = await client.post(url, json=row.model_dump())
+    status_code, data, text = await apps_script_post_json(url, row.model_dump())
 
-    if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
+    if status_code >= 400:
+        raise HTTPException(status_code=status_code, detail=text)
 
-    data = _safe_json(response)
     if isinstance(data, dict) and data.get("ok") is False:
         raise HTTPException(status_code=502, detail=data)
 
     return {
         "ok": True,
-        "saved": True,
-        "status_code": response.status_code,
+        "saved": bool(isinstance(data, dict) and data.get("saved") is True),
+        "status_code": status_code,
         "apps_script_response": data,
     }
