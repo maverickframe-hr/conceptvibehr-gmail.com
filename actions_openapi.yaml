@@ -131,6 +131,27 @@ paths:
           schema: { type: integer, default: 20 }
       responses:
         '200': { description: OK }
+
+  /rabota/responses_short:
+    get:
+      operationId: getRabotaResponsesShort
+      summary: Get shortened Rabota.by candidate responses for a vacancy
+      parameters:
+        - name: vacancy_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+        - name: per_page
+          in: query
+          required: false
+          schema: { type: integer, default: 20 }
+      responses:
+        '200': { description: OK }
+
   /sheets/save_candidate:
     post:
       operationId: saveCandidateToSheets

@@ -1,22 +1,13 @@
-# Maverickframe HH + Rabota.by Stable Auth MVP
+# Maverickframe HH + Rabota.by resilient auth bridge
 
-This update fixes the recurring authorization loss on Render Free.
+Fixes:
+- Persistent OAuth token save/load via Google Apps Script with POST and GET fallback.
+- GET + POST debug endpoint `/debug/{provider}/token_store_roundtrip`.
+- Token refresh on API 401 using refresh_token.
+- Short candidate response endpoint `/rabota/responses_short` to avoid oversized GPT Action responses.
 
-## Key fix
-All calls from Render to Google Apps Script now use `follow_redirects=True`, because Apps Script Web Apps normally return a redirect from `script.google.com` to `script.googleusercontent.com`.
-
-Without following that redirect, token saving/loading can silently fail or return HTML (`Moved Temporarily`) instead of JSON.
-
-## Added debug endpoints
-
-- `/debug/rabota/token_status` - checks whether local and remote Rabota tokens exist.
-- `/debug/rabota/token_store_roundtrip` - tests saving/loading a test token through Google Apps Script.
-
-## After upload
-
-1. Upload files to GitHub.
-2. Wait for Render `Deploy live`.
-3. Open `/debug/rabota/token_store_roundtrip`.
-4. Authorize Rabota once: `/auth/rabota/start`.
-5. Check `/debug/rabota/token_status`.
-6. Restart Render and check `/rabota/me` without re-authorizing.
+After deploy:
+1. Update Apps Script with `google_apps_script_code.gs`, deploy new version, keep `/exec` URL in `GOOGLE_APPS_SCRIPT_URL`.
+2. Test: `/debug/rabota/token_store_roundtrip` should return `ok: true`.
+3. Authorize once: `/auth/rabota/start`. Callback should show `remote_saved: true`.
+4. Test after restart: `/debug/rabota/token_status` should show `remote_token_exists: true`.

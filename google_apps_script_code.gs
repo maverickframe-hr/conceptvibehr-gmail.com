@@ -9,16 +9,32 @@ function jsonResponse(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+function parseBody_(e) {
+  var body = {};
+  if (e && e.postData && e.postData.contents) {
+    body = JSON.parse(e.postData.contents);
+  }
+  return body;
+}
+
 function doGet(e) {
-  return jsonResponse({ ok: true, service: 'Maverickframe HR token store and candidate database' });
+  try {
+    var params = (e && e.parameter) ? e.parameter : {};
+    if (params.action === 'load_token') {
+      return loadToken_(params.provider);
+    }
+    if (params.action === 'ping') {
+      return jsonResponse({ ok: true, service: 'Maverickframe HR token store and candidate database', ping: true });
+    }
+    return jsonResponse({ ok: true, service: 'Maverickframe HR token store and candidate database' });
+  } catch (err) {
+    return jsonResponse({ ok: false, error: String(err) });
+  }
 }
 
 function doPost(e) {
   try {
-    var body = {};
-    if (e && e.postData && e.postData.contents) {
-      body = JSON.parse(e.postData.contents);
-    }
+    var body = parseBody_(e);
 
     if (body.action === 'save_token') {
       return saveToken_(body.provider, body.tokens);
