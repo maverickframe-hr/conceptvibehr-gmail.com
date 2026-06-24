@@ -65,7 +65,7 @@ async def save_tokens_remote(provider_name: str, tokens: Dict[str, Any]) -> None
         return
     payload = {"action": "save_token", "provider": provider_name, "tokens": tokens}
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.post(url, json=payload)
         if response.status_code >= 400:
             print(f"Token remote save failed for {provider_name}: {response.status_code} {response.text}")
@@ -79,7 +79,7 @@ async def load_tokens_remote(provider_name: str) -> Optional[Dict[str, Any]]:
         return None
     payload = {"action": "load_token", "provider": provider_name}
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.post(url, json=payload)
         if response.status_code >= 400:
             print(f"Token remote load failed for {provider_name}: {response.status_code} {response.text}")
@@ -223,6 +223,32 @@ async def resume(provider_name: str, resume_id: str):
     return await api_request(provider_name, "GET", f"/resumes/{resume_id}")
 
 
+@app.get("/debug/{provider_name}/token_status")
+async def token_status(provider_name: str):
+    provider(provider_name)
+    local_exists = provider(provider_name)["token_file"].exists()
+    remote_tokens = await load_tokens_remote(provider_name)
+    return {
+        "ok": True,
+        "provider": provider_name,
+        "local_token_exists": local_exists,
+        "remote_token_exists": bool(remote_tokens and remote_tokens.get("access_token")),
+    }
+
+
+@app.post("/debug/{provider_name}/token_store_roundtrip")
+async def token_store_roundtrip(provider_name: str):
+    provider(provider_name)
+    test_tokens = {"access_token": "test-access-token", "refresh_token": "test-refresh-token"}
+    await save_tokens_remote(provider_name + "_test", test_tokens)
+    loaded = await load_tokens_remote(provider_name + "_test")
+    return {
+        "ok": bool(loaded and loaded.get("access_token") == "test-access-token"),
+        "provider": provider_name,
+        "loaded": loaded,
+    }
+
+
 class CandidateRow(BaseModel):
     date_added: Optional[str] = None
     source: str = "HH"
@@ -242,24 +268,23 @@ class CandidateRow(BaseModel):
 @app.post("/sheets/save_candidate")
 async def save_candidate(row: CandidateRow):
     url = env("GOOGLE_APPS_SCRIPT_URL")
-
-    async with httpx.AsyncClient(
-        timeout=30,
-        follow_redirects=True
-    ) as client:
-        response = await client.post(
-            url,
-            json=row.model_dump()
-        )
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        response = await client.post(url, json=row.model_dump())
 
     if response.status_code >= 400:
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=response.text
-        )
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"ok": True, "response": response.text}
+
+    if isinstance(data, dict) and data.get("ok") is False:
+        raise HTTPException(status_code=502, detail=data)
 
     return {
         "ok": True,
+        "saved": True,
         "status_code": response.status_code,
-        "response": response.text
+        "apps_script_response": data,
     }
