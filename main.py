@@ -53,7 +53,7 @@ PROVIDERS = {
     },
 }
 
-app = FastAPI(title=APP_NAME, version="0.4.1")
+app = FastAPI(title=APP_NAME, version="0.5.0")
 
 
 def env(name: str, required: bool = True) -> Optional[str]:
@@ -129,6 +129,67 @@ def _cache_tokens_local(provider_name: str, tokens: Dict[str, Any], source: str)
         return False
 
 
+def _bounded_int(value: int, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, number))
+
+
+def _compact_user(me_data: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": me_data.get("id"),
+        "email": me_data.get("email"),
+        "first_name": me_data.get("first_name"),
+        "last_name": me_data.get("last_name"),
+        "is_employer": me_data.get("is_employer"),
+        "is_hiring_manager": me_data.get("is_hiring_manager"),
+    }
+
+
+def _compact_employer(employer: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": str(employer.get("id")) if employer.get("id") is not None else None,
+        "name": employer.get("name"),
+        "alternate_url": employer.get("alternate_url"),
+    }
+
+
+def extract_employer_info(me_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    employer = me_data.get("employer")
+    if isinstance(employer, dict) and employer.get("id"):
+        return _compact_employer(employer)
+
+    employers = me_data.get("employers")
+    if isinstance(employers, list):
+        for item in employers:
+            if isinstance(item, dict) and item.get("id"):
+                return _compact_employer(item)
+
+    manager = me_data.get("manager")
+    if isinstance(manager, dict):
+        manager_employer = manager.get("employer")
+        if isinstance(manager_employer, dict) and manager_employer.get("id"):
+            return _compact_employer(manager_employer)
+
+    return None
+
+
+def require_employer_info(provider_name: str, me_data: Dict[str, Any]) -> Dict[str, Any]:
+    employer_info = extract_employer_info(me_data)
+    if employer_info and employer_info.get("id"):
+        return employer_info
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": f"No employer account found for this {provider_name} user.",
+            "provider": provider_name,
+            "me_keys": sorted(me_data.keys()),
+        },
+    )
+
+
 async def apps_script_post_json(url: str, payload: Dict[str, Any]) -> tuple[int, Dict[str, Any], str]:
     """Post JSON to Google Apps Script and read the redirected ContentService body.
 
@@ -186,6 +247,19 @@ async def apps_script_post_json(url: str, payload: Dict[str, Any]) -> tuple[int,
             return response.status_code, data, last_text
     logger.warning("Apps Script too many redirects for action=%s provider=%s", action, provider_name)
     return 599, {"ok": False, "error": "too many redirects", "text": last_text[:1000]}, last_text
+
+
+async def apps_script_action(action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    url = env("GOOGLE_APPS_SCRIPT_URL")
+    status_code, data, text = await apps_script_post_json(url, {**payload, "action": action})
+
+    if status_code >= 400:
+        raise HTTPException(status_code=status_code, detail=text)
+
+    if isinstance(data, dict) and data.get("ok") is False:
+        raise HTTPException(status_code=502, detail=data)
+
+    return data
 
 
 async def save_tokens_remote(provider_name: str, tokens: Dict[str, Any]) -> bool:
@@ -339,6 +413,9 @@ def root():
         "ok": True,
         "service": APP_NAME,
         "hh_start": "/auth/hh/start",
+        "hh_employer_start": "/auth/hh/employer/start",
+        "hh_employer": "/hh/employer",
+        "hh_emails": "/gmail/hh/emails",
         "rabota_start": "/auth/rabota/start",
         "hh_me": "/hh/me",
         "rabota_me": "/rabota/me",
@@ -352,18 +429,26 @@ def health():
 
 
 @app.get("/auth/{provider_name}/start")
-def auth_start(provider_name: str):
+def auth_start(provider_name: str, state: Optional[str] = None):
     p = provider(provider_name)
-    params = urlencode({
+    auth_params = {
         "response_type": "code",
         "client_id": env(p["client_id"]),
         "redirect_uri": env(p["redirect_uri"]),
-    })
+    }
+    if state:
+        auth_params["state"] = state
+    params = urlencode(auth_params)
     return RedirectResponse(f"{p['auth']}?{params}")
 
 
+@app.get("/auth/hh/employer/start")
+def hh_employer_auth_start():
+    return auth_start("hh", state="hh_employer")
+
+
 @app.get("/auth/{provider_name}/callback")
-async def auth_callback(provider_name: str, code: str):
+async def auth_callback(provider_name: str, code: str, state: Optional[str] = None):
     p = provider(provider_name)
     data = {
         "grant_type": "authorization_code",
@@ -383,6 +468,7 @@ async def auth_callback(provider_name: str, code: str):
     return {
         "ok": True,
         "remote_saved": remote_saved,
+        "state": state,
         "message": f"{provider_name} authorized successfully. You can now use /{provider_name}/me and /{provider_name}/vacancies."
     }
 
@@ -393,29 +479,41 @@ async def me(provider_name: str):
     return await api_request(provider_name, "GET", "/me")
 
 
+@app.get("/hh/employer")
+async def hh_employer():
+    me_data = await api_request("hh", "GET", "/me")
+    employer_info = require_employer_info("hh", me_data)
+    return {
+        "ok": True,
+        "provider": "hh",
+        "user": _compact_user(me_data),
+        "employer": employer_info,
+    }
+
+
 @app.get("/{provider_name}/vacancies")
 async def vacancies(provider_name: str, employer_id: Optional[str] = None, page: int = 0, per_page: int = 20):
     provider(provider_name)
+    employer_info = None
     if not employer_id:
         me_data = await api_request(provider_name, "GET", "/me")
-
-        if provider_name == "rabota":
-            employer = me_data.get("employer")
-            if not employer:
-                raise HTTPException(status_code=400, detail="No employer account found for this rabota user.")
-            employer_id = employer.get("id")
-        else:
-            employers = me_data.get("employers") or []
-            if not employers:
-                raise HTTPException(status_code=400, detail=f"No employer accounts found for this {provider_name} user.")
-            employer_id = employers[0].get("id")
+        employer_info = require_employer_info(provider_name, me_data)
+        employer_id = employer_info["id"]
 
     if provider_name == "rabota":
         params = {"employer_id": employer_id, "page": page, "per_page": per_page}
         return await api_request(provider_name, "GET", "/vacancies", params=params)
 
     params = {"page": page, "per_page": per_page}
-    return await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies", params=params)
+    data = await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies", params=params)
+    if isinstance(data, dict) and employer_info:
+        data.setdefault("employer", employer_info)
+    return data
+
+
+@app.get("/hh/employer/vacancies")
+async def hh_employer_vacancies(employer_id: Optional[str] = None, page: int = 0, per_page: int = 20):
+    return await vacancies("hh", employer_id=employer_id, page=page, per_page=per_page)
 
 
 @app.get("/{provider_name}/negotiations")
@@ -425,11 +523,21 @@ async def negotiations(provider_name: str, vacancy_id: str, page: int = 0, per_p
     return await api_request(provider_name, "GET", "/negotiations", params=params)
 
 
+@app.get("/hh/employer/negotiations")
+async def hh_employer_negotiations(vacancy_id: str, page: int = 0, per_page: int = 20):
+    return await negotiations("hh", vacancy_id=vacancy_id, page=page, per_page=per_page)
+
+
 @app.get("/{provider_name}/responses")
 async def responses(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20):
     provider(provider_name)
     params = {"vacancy_id": vacancy_id, "page": page, "per_page": per_page}
     return await api_request(provider_name, "GET", "/negotiations/response", params=params)
+
+
+@app.get("/hh/employer/responses")
+async def hh_employer_responses(vacancy_id: str, page: int = 0, per_page: int = 20):
+    return await responses("hh", vacancy_id=vacancy_id, page=page, per_page=per_page)
 
 
 @app.get("/{provider_name}/responses_short")
@@ -456,10 +564,41 @@ async def responses_short(provider_name: str, vacancy_id: str, page: int = 0, pe
     return {"found": data.get("found"), "page": data.get("page"), "pages": data.get("pages"), "per_page": data.get("per_page"), "items": short_items}
 
 
+@app.get("/hh/employer/responses_short")
+async def hh_employer_responses_short(vacancy_id: str, page: int = 0, per_page: int = 20):
+    return await responses_short("hh", vacancy_id=vacancy_id, page=page, per_page=per_page)
+
+
 @app.get("/{provider_name}/resume/{resume_id}")
 async def resume(provider_name: str, resume_id: str):
     provider(provider_name)
     return await api_request(provider_name, "GET", f"/resumes/{resume_id}")
+
+
+@app.get("/gmail/hh/emails")
+async def gmail_hh_emails(
+    query: Optional[str] = None,
+    max_results: int = 10,
+    newer_than_days: int = 30,
+    unread_only: bool = False,
+    include_body: bool = False,
+):
+    payload = {
+        "query": query,
+        "max_results": _bounded_int(max_results, 10, 1, 50),
+        "newer_than_days": _bounded_int(newer_than_days, 30, 1, 365),
+        "unread_only": unread_only,
+        "include_body": include_body,
+    }
+    logger.info(
+        "Reading HH emails via Apps Script: max_results=%s newer_than_days=%s unread_only=%s include_body=%s custom_query=%s",
+        payload["max_results"],
+        payload["newer_than_days"],
+        unread_only,
+        include_body,
+        bool(query),
+    )
+    return await apps_script_action("read_hh_emails", payload)
 
 
 @app.get("/debug/{provider_name}/token_status")
@@ -483,6 +622,23 @@ async def remote_token(provider_name: str):
     if not tokens:
         return {"ok": False, "provider": provider_name, "message": "No remote token found"}
     return {"ok": True, "provider": provider_name, "has_access_token": bool(tokens.get("access_token")), "has_refresh_token": bool(tokens.get("refresh_token"))}
+
+
+@app.get("/debug/{provider_name}/oauth_config")
+def oauth_config(provider_name: str):
+    p = provider(provider_name)
+    return {
+        "ok": True,
+        "provider": provider_name,
+        "auth_url": p["auth"],
+        "token_url": p["token"],
+        "api_url": p["api"],
+        "client_id_configured": bool(os.getenv(p["client_id"])),
+        "client_secret_configured": bool(os.getenv(p["client_secret"])),
+        "redirect_uri_configured": bool(os.getenv(p["redirect_uri"])),
+        "redirect_uri": os.getenv(p["redirect_uri"]),
+        "user_agent_configured": bool(os.getenv(p["user_agent"])),
+    }
 
 
 @app.get("/debug/{provider_name}/token_store_roundtrip")
@@ -519,18 +675,10 @@ class CandidateRow(BaseModel):
 
 @app.post("/sheets/save_candidate")
 async def save_candidate(row: CandidateRow):
-    url = env("GOOGLE_APPS_SCRIPT_URL")
-    status_code, data, text = await apps_script_post_json(url, row.model_dump())
-
-    if status_code >= 400:
-        raise HTTPException(status_code=status_code, detail=text)
-
-    if isinstance(data, dict) and data.get("ok") is False:
-        raise HTTPException(status_code=502, detail=data)
+    data = await apps_script_action("save_candidate", row.model_dump())
 
     return {
         "ok": True,
         "saved": bool(isinstance(data, dict) and data.get("saved") is True),
-        "status_code": status_code,
         "apps_script_response": data,
     }
