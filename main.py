@@ -383,9 +383,8 @@ async def refresh_tokens(provider_name: str, tokens: Dict[str, Any]) -> Optional
         return None
 
 
-async def api_request(provider_name: str, method: str, path: str, **kwargs):
+async def api_request_with_tokens(provider_name: str, tokens: Dict[str, Any], method: str, path: str, **kwargs):
     p = provider(provider_name)
-    tokens = await load_tokens(provider_name)
     headers = kwargs.pop("headers", {})
     headers.update({
         "Authorization": f"Bearer {tokens['access_token']}",
@@ -405,6 +404,11 @@ async def api_request(provider_name: str, method: str, path: str, **kwargs):
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     return response.json()
+
+
+async def api_request(provider_name: str, method: str, path: str, **kwargs):
+    tokens = await load_tokens(provider_name)
+    return await api_request_with_tokens(provider_name, tokens, method, path, **kwargs)
 
 
 @app.get("/")
@@ -464,13 +468,22 @@ async def auth_callback(provider_name: str, code: str, state: Optional[str] = No
         raise HTTPException(status_code=response.status_code, detail=response.text)
     tokens = response.json()
     logger.info("OAuth callback received %s tokens: %s", provider_name, _token_summary(tokens))
+
+    employer_info = None
+    if provider_name == "hh" and state == "hh_employer":
+        me_data = await api_request_with_tokens("hh", tokens, "GET", "/me")
+        employer_info = require_employer_info("hh", me_data)
+
     remote_saved = await save_tokens(provider_name, tokens)
-    return {
+    result = {
         "ok": True,
         "remote_saved": remote_saved,
         "state": state,
         "message": f"{provider_name} authorized successfully. You can now use /{provider_name}/me and /{provider_name}/vacancies."
     }
+    if employer_info:
+        result["employer"] = employer_info
+    return result
 
 
 @app.get("/{provider_name}/me")
