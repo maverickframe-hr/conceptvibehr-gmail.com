@@ -3,7 +3,21 @@
  * - Stores OAuth tokens persistently in Script Properties
  * - Saves selected candidates to the Candidates sheet
  */
+var TOKEN_STORE_VERSION = '0.4.1';
+
+function tokenSummary_(tokens) {
+  tokens = tokens || {};
+  return {
+    has_access_token: Boolean(tokens.access_token),
+    has_refresh_token: Boolean(tokens.refresh_token),
+    token_type: tokens.token_type || null,
+    expires_in: tokens.expires_in || null,
+    keys: Object.keys(tokens).sort()
+  };
+}
+
 function jsonResponse(obj) {
+  obj.version = obj.version || TOKEN_STORE_VERSION;
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
@@ -20,6 +34,7 @@ function parseBody_(e) {
 function doGet(e) {
   try {
     var params = (e && e.parameter) ? e.parameter : {};
+    console.log('doGet action=%s provider=%s version=%s', params.action || '', params.provider || '', TOKEN_STORE_VERSION);
     if (params.action === 'load_token') {
       return loadToken_(params.provider);
     }
@@ -35,6 +50,7 @@ function doGet(e) {
 function doPost(e) {
   try {
     var body = parseBody_(e);
+    console.log('doPost action=%s provider=%s version=%s', body.action || 'save_candidate', body.provider || '', TOKEN_STORE_VERSION);
 
     if (body.action === 'save_token') {
       return saveToken_(body.provider, body.tokens);
@@ -56,6 +72,7 @@ function saveToken_(provider, tokens) {
   }
   var key = 'oauth_tokens_' + provider;
   PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(tokens));
+  console.log('saveToken provider=%s summary=%s', provider, JSON.stringify(tokenSummary_(tokens)));
   return jsonResponse({ ok: true, saved: true, provider: provider });
 }
 
@@ -66,9 +83,12 @@ function loadToken_(provider) {
   var key = 'oauth_tokens_' + provider;
   var raw = PropertiesService.getScriptProperties().getProperty(key);
   if (!raw) {
+    console.log('loadToken provider=%s found=false', provider);
     return jsonResponse({ ok: false, tokens: null, error: 'token not found' });
   }
-  return jsonResponse({ ok: true, provider: provider, tokens: JSON.parse(raw) });
+  var tokens = JSON.parse(raw);
+  console.log('loadToken provider=%s found=true summary=%s', provider, JSON.stringify(tokenSummary_(tokens)));
+  return jsonResponse({ ok: true, provider: provider, tokens: tokens });
 }
 
 function saveCandidate_(row) {
@@ -111,5 +131,6 @@ function saveCandidate_(row) {
     row.gpt_summary || ''
   ]);
 
+  console.log('saveCandidate saved=true source=%s', row.source || '');
   return jsonResponse({ ok: true, saved: true });
 }
