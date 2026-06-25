@@ -23,6 +23,7 @@ After deploy:
    Because Gmail reading uses `GmailApp`, the Apps Script deployment must be re-authorized with Gmail read permissions.
 3. Test HH OAuth config: `/debug/hh/oauth_config` should show `client_id_configured`, `client_secret_configured`, and `redirect_uri_configured` as `true`.
 4. Authorize HH employer once: `/auth/hh/employer/start`. Callback should show `remote_saved: true`.
+   The employer callback validates `/me` before saving and rejects applicant-only HH accounts.
 5. Test HH employer workflow: `/hh/employer`, `/hh/employer/vacancies`, then `/hh/responses_short?vacancy_id=...`.
 6. Test Gmail HH emails: `/gmail/hh/emails?max_results=5&unread_only=false`.
 7. Test token persistence after restart: `/debug/hh/token_status` and `/debug/rabota/token_status` should show `remote_token_exists: true`.
