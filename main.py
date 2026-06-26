@@ -695,3 +695,44 @@ async def save_candidate(row: CandidateRow):
         "saved": bool(isinstance(data, dict) and data.get("saved") is True),
         "apps_script_response": data,
     }
+
+
+# -- Negotiation messages (chaty s kandidatami) ----------------------------
+
+@app.get("/{provider_name}/negotiations/{nid}/messages")
+async def negotiation_messages(provider_name: str, nid: str, page: int = 0, per_page: int = 20):
+    """Read messages in a negotiation chat thread with a candidate."""
+    provider(provider_name)
+    params = {"page": page, "per_page": per_page}
+    return await api_request(provider_name, "GET", f"/negotiations/{nid}/messages", params=params)
+
+@app.get("/hh/employer/negotiations/{nid}/messages")
+async def hh_employer_negotiation_messages(nid: str, page: int = 0, per_page: int = 20):
+    """Read messages in a HH.ru negotiation."""
+    return await negotiation_messages("hh", nid=nid, page=page, per_page=per_page)
+
+@app.get("/rabota/employer/negotiations/{nid}/messages")
+async def rabota_employer_negotiation_messages(nid: str, page: int = 0, per_page: int = 20):
+    """Read messages in a Rabota.by negotiation."""
+    return await negotiation_messages("rabota", nid=nid, page=page, per_page=per_page)
+
+
+class MessageBody(BaseModel):
+    message: str
+
+
+@app.post("/{provider_name}/negotiations/{nid}/messages")
+async def send_negotiation_message(provider_name: str, nid: str, body: MessageBody):
+    """Send a message in a negotiation. Requires explicit call - never sent automatically."""
+    provider(provider_name)
+    return await api_request(provider_name, "POST", f"/negotiations/{nid}/messages", json={"message": body.message})
+
+@app.post("/hh/employer/negotiations/{nid}/messages")
+async def hh_send_negotiation_message(nid: str, body: MessageBody):
+    """Send a message to a candidate via HH.ru."""
+    return await send_negotiation_message("hh", nid=nid, body=body)
+
+@app.post("/rabota/employer/negotiations/{nid}/messages")
+async def rabota_send_negotiation_message(nid: str, body: MessageBody):
+    """Send a message to a candidate via Rabota.by."""
+    return await send_negotiation_message("rabota", nid=nid, body=body)
