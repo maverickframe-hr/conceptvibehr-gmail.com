@@ -14,10 +14,7 @@ APP_NAME = "Maverickframe HH + Rabota.by MVP Bridge"
 TOKEN_DIR = Path("/tmp")
 
 LOG_LEVEL = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("maverickframe_hh_bridge")
 logger.setLevel(LOG_LEVEL)
 
@@ -53,7 +50,7 @@ PROVIDERS = {
     },
 }
 
-app = FastAPI(title=APP_NAME, version="0.5.0")
+app = FastAPI(title=APP_NAME, version="0.5.1")
 
 
 def env(name: str, required: bool = True) -> Optional[str]:
@@ -189,18 +186,18 @@ async def apps_script_post_json(url: str, payload: Dict[str, Any]) -> tuple[int,
             else:
                 response = await client.get(current_url)
             last_text = response.text
-            logger.info("Apps Script %s action=%s provider=%s attempt=%s status=%s", method, action, provider_name, attempt, response.status_code)
+            logger.info("Apps Script %s action=%s attempt=%s status=%s", method, action, attempt, response.status_code)
             if response.status_code in (301, 302, 303, 307, 308):
                 location = response.headers.get("location")
                 if not location:
-                    return response.status_code, {"ok": False, "error": "redirect without location", "text": last_text[:1000]}, last_text
+                    return response.status_code, {"ok": False, "error": "redirect without location"}, last_text
                 current_url = str(response.url.join(location))
                 if response.status_code in (301, 302, 303):
                     method = "GET"
                 continue
             data = _safe_json(response)
             return response.status_code, data, last_text
-    return 599, {"ok": False, "error": "too many redirects", "text": last_text[:1000]}, last_text
+    return 599, {"ok": False, "error": "too many redirects"}, last_text
 
 
 async def apps_script_action(action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -217,9 +214,8 @@ async def save_tokens_remote(provider_name: str, tokens: Dict[str, Any]) -> bool
     url = token_store_url()
     if not url:
         return False
-    payload = {"action": "save_token", "provider": provider_name, "tokens": tokens}
     try:
-        status_code, data, _text = await apps_script_post_json(url, payload)
+        status_code, data, _text = await apps_script_post_json(url, {"action": "save_token", "provider": provider_name, "tokens": tokens})
         return status_code < 400 and data.get("ok") is not False and data.get("saved") is True
     except Exception:
         return False
@@ -229,9 +225,8 @@ async def load_tokens_remote(provider_name: str) -> Optional[Dict[str, Any]]:
     url = token_store_url()
     if not url:
         return None
-    payload = {"action": "load_token", "provider": provider_name}
     try:
-        status_code, data, _text = await apps_script_post_json(url, payload)
+        status_code, data, _text = await apps_script_post_json(url, {"action": "load_token", "provider": provider_name})
         tokens = data.get("tokens") if isinstance(data, dict) else None
         if isinstance(tokens, dict) and tokens.get("access_token"):
             _cache_tokens_local(provider_name, tokens, "remote POST load")
@@ -239,9 +234,8 @@ async def load_tokens_remote(provider_name: str) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         logger.exception("Token remote POST load error for %s: %s", provider_name, exc)
     try:
-        params = {"action": "load_token", "provider": provider_name}
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, params={"action": "load_token", "provider": provider_name})
         data = _safe_json(response)
         tokens = data.get("tokens") if isinstance(data, dict) else None
         if isinstance(tokens, dict) and tokens.get("access_token"):
@@ -270,7 +264,7 @@ async def load_tokens(provider_name: str) -> Dict[str, Any]:
     remote_tokens = await load_tokens_remote(provider_name)
     if remote_tokens:
         return remote_tokens
-    raise HTTPException(status_code=401, detail=f"{provider_name} is not authorized yet. Open /auth/{provider_name}/start first.")
+    raise HTTPException(status_code=401, detail=f"{provider_name} is not authorized yet.")
 
 
 async def refresh_tokens(provider_name: str, tokens: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -327,7 +321,7 @@ async def api_request(provider_name: str, method: str, path: str, **kwargs):
 
 @app.get("/")
 def root():
-    return {"ok": True, "service": APP_NAME, "hh_vacancies_mine": "/hh/vacancies_mine", "hh_employer": "/hh/employer"}
+    return {"ok": True, "service": APP_NAME, "hh_vacancies_mine": "/hh/vacancies_mine"}
 
 
 @app.get("/health")
@@ -398,10 +392,8 @@ async def vacancies(provider_name: str, employer_id: Optional[str] = None, page:
         employer_info = require_employer_info(provider_name, me_data)
         employer_id = employer_info["id"]
     if provider_name == "rabota":
-        params = {"employer_id": employer_id, "page": page, "per_page": per_page}
-        return await api_request(provider_name, "GET", "/vacancies", params=params)
-    params = {"page": page, "per_page": per_page}
-    data = await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies", params=params)
+        return await api_request(provider_name, "GET", "/vacancies", params={"employer_id": employer_id, "page": page, "per_page": per_page})
+    data = await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies", params={"page": page, "per_page": per_page})
     if isinstance(data, dict) and employer_info:
         data.setdefault("employer", employer_info)
     return data
@@ -414,18 +406,69 @@ async def hh_employer_vacancies(employer_id: Optional[str] = None, page: int = 0
 
 @app.get("/{provider_name}/vacancies_mine")
 async def vacancies_mine(provider_name: str, page: int = 0, per_page: int = 20):
-    """List ALL own vacancies (active, archived, draft) for authenticated employer.
-    Uses HH.ru /vacancies/mine — requires employer OAuth token."""
+    """List ALL own vacancies for authenticated employer.
+    Tries multiple HH API approaches including hh.kz regional host."""
     provider(provider_name)
-    params = {"page": page, "per_page": per_page}
-    return await api_request(provider_name, "GET", "/vacancies/mine", params=params)
+
+    # Get manager info first
+    me_data = await api_request(provider_name, "GET", "/me")
+    manager_id = None
+    employer_id = None
+    manager = me_data.get("manager")
+    if isinstance(manager, dict):
+        manager_id = manager.get("id")
+    employer = me_data.get("employer")
+    if isinstance(employer, dict):
+        employer_id = employer.get("id")
+
+    errors = []
+
+    # Approach 1: /vacancies/mine
+    try:
+        data = await api_request(provider_name, "GET", "/vacancies/mine", params={"page": page, "per_page": per_page})
+        if isinstance(data, dict) and "items" in data:
+            data["_source"] = "vacancies/mine"
+            return data
+    except HTTPException as e:
+        errors.append({"path": "/vacancies/mine", "error": str(e.detail)[:200]})
+
+    # Approach 2: /vacancies?manager_id=X (search by manager)
+    if manager_id:
+        try:
+            data = await api_request(provider_name, "GET", "/vacancies", params={"manager_id": manager_id, "page": page, "per_page": per_page})
+            if isinstance(data, dict) and ("items" in data or "found" in data):
+                data["_source"] = f"vacancies?manager_id={manager_id}"
+                return data
+        except HTTPException as e:
+            errors.append({"path": f"/vacancies?manager_id={manager_id}", "error": str(e.detail)[:200]})
+
+    # Approach 3: /vacancies?manager_id=X&host=hh.kz (Kazakhstan regional)
+    if manager_id:
+        try:
+            data = await api_request(provider_name, "GET", "/vacancies", params={"manager_id": manager_id, "host": "hh.kz", "page": page, "per_page": per_page})
+            if isinstance(data, dict) and ("items" in data or "found" in data):
+                data["_source"] = f"vacancies?manager_id={manager_id}&host=hh.kz"
+                return data
+        except HTTPException as e:
+            errors.append({"path": f"/vacancies?manager_id={manager_id}&host=hh.kz", "error": str(e.detail)[:200]})
+
+    # Approach 4: /employers/{id}/vacancies/active
+    if employer_id:
+        try:
+            data = await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies/active", params={"page": page, "per_page": per_page})
+            if isinstance(data, dict) and ("items" in data or "found" in data):
+                data["_source"] = f"employers/{employer_id}/vacancies/active"
+                return data
+        except HTTPException as e:
+            errors.append({"path": f"/employers/{employer_id}/vacancies/active", "error": str(e.detail)[:200]})
+
+    return {"ok": False, "message": "All vacancy endpoints returned errors", "tried": errors, "manager_id": manager_id, "employer_id": employer_id}
 
 
 @app.get("/{provider_name}/negotiations")
 async def negotiations(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20):
     provider(provider_name)
-    params = {"vacancy_id": vacancy_id, "page": page, "per_page": per_page}
-    return await api_request(provider_name, "GET", "/negotiations", params=params)
+    return await api_request(provider_name, "GET", "/negotiations", params={"vacancy_id": vacancy_id, "page": page, "per_page": per_page})
 
 
 @app.get("/hh/employer/negotiations")
@@ -436,8 +479,7 @@ async def hh_employer_negotiations(vacancy_id: str, page: int = 0, per_page: int
 @app.get("/{provider_name}/responses")
 async def responses(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20):
     provider(provider_name)
-    params = {"vacancy_id": vacancy_id, "page": page, "per_page": per_page}
-    return await api_request(provider_name, "GET", "/negotiations/response", params=params)
+    return await api_request(provider_name, "GET", "/negotiations/response", params={"vacancy_id": vacancy_id, "page": page, "per_page": per_page})
 
 
 @app.get("/hh/employer/responses")
@@ -512,7 +554,7 @@ async def remote_token(provider_name: str):
 @app.get("/debug/{provider_name}/oauth_config")
 def oauth_config(provider_name: str):
     p = provider(provider_name)
-    return {"ok": True, "provider": provider_name, "auth_url": p["auth"], "token_url": p["token"], "api_url": p["api"], "client_id_configured": bool(os.getenv(p["client_id"])), "client_secret_configured": bool(os.getenv(p["client_secret"])), "redirect_uri_configured": bool(os.getenv(p["redirect_uri"])), "redirect_uri": os.getenv(p["redirect_uri"])}
+    return {"ok": True, "provider": provider_name, "auth_url": p["auth"], "token_url": p["token"], "api_url": p["api"], "client_id_configured": bool(os.getenv(p["client_id"])), "redirect_uri": os.getenv(p["redirect_uri"])}
 
 
 @app.get("/debug/{provider_name}/token_store_roundtrip")
@@ -522,7 +564,7 @@ async def token_store_roundtrip(provider_name: str):
     test_tokens = {"access_token": "test-access-token", "refresh_token": "test-refresh-token"}
     saved = await save_tokens_remote(provider_name + "_test", test_tokens)
     loaded = await load_tokens_remote(provider_name + "_test")
-    return {"ok": bool(saved and loaded and loaded.get("access_token") == "test-access-token"), "provider": provider_name, "saved": saved, "loaded_has_access_token": bool(loaded and loaded.get("access_token"))}
+    return {"ok": bool(saved and loaded and loaded.get("access_token") == "test-access-token"), "provider": provider_name, "saved": saved}
 
 
 class CandidateRow(BaseModel):
@@ -549,10 +591,8 @@ async def save_candidate(row: CandidateRow):
 
 @app.get("/{provider_name}/negotiations/{nid}/messages")
 async def negotiation_messages(provider_name: str, nid: str, page: int = 0, per_page: int = 20):
-    """Read messages in a negotiation chat thread with a candidate."""
     provider(provider_name)
-    params = {"page": page, "per_page": per_page}
-    return await api_request(provider_name, "GET", f"/negotiations/{nid}/messages", params=params)
+    return await api_request(provider_name, "GET", f"/negotiations/{nid}/messages", params={"page": page, "per_page": per_page})
 
 
 @app.get("/hh/employer/negotiations/{nid}/messages")
@@ -571,7 +611,7 @@ class MessageBody(BaseModel):
 
 @app.post("/{provider_name}/negotiations/{nid}/messages")
 async def send_negotiation_message(provider_name: str, nid: str, body: MessageBody):
-    """Send a message in a negotiation. Requires explicit call - never sent automatically."""
+    """Send a message. Only call when user explicitly requests."""
     provider(provider_name)
     return await api_request(provider_name, "POST", f"/negotiations/{nid}/messages", json={"message": body.message})
 
