@@ -406,63 +406,62 @@ async def hh_employer_vacancies(employer_id: Optional[str] = None, page: int = 0
 
 @app.get("/{provider_name}/vacancies_mine")
 async def vacancies_mine(provider_name: str, page: int = 0, per_page: int = 20):
-    """List ALL own vacancies for authenticated employer.
-    Tries multiple HH API approaches including hh.kz regional host."""
+    """List own vacancies for authenticated employer.
+    Tries api.hh.ru and api.hh.kz with authenticated employer-only endpoints.
+    Does NOT use public /vacancies search (returns other employers' vacancies)."""
     provider(provider_name)
+    tokens = await load_tokens(provider_name)
+    p = provider(provider_name)
+    ua = env(p["user_agent"], required=False) or p["default_ua"]
 
-    # Get manager info first
-    me_data = await api_request(provider_name, "GET", "/me")
-    manager_id = None
+    me_data = await api_request_with_tokens(provider_name, tokens, "GET", "/me")
     employer_id = None
-    manager = me_data.get("manager")
-    if isinstance(manager, dict):
-        manager_id = manager.get("id")
     employer = me_data.get("employer")
     if isinstance(employer, dict):
         employer_id = employer.get("id")
 
     errors = []
+    params = {"page": page, "per_page": per_page}
+    base_urls = ["https://api.hh.ru", "https://api.hh.kz"]
 
-    # Approach 1: /vacancies/mine
-    try:
-        data = await api_request(provider_name, "GET", "/vacancies/mine", params={"page": page, "per_page": per_page})
-        if isinstance(data, dict) and "items" in data:
-            data["_source"] = "vacancies/mine"
-            return data
-    except HTTPException as e:
-        errors.append({"path": "/vacancies/mine", "error": str(e.detail)[:200]})
-
-    # Approach 2: /vacancies?manager_id=X (search by manager)
-    if manager_id:
+    for base_url in base_urls:
+        # /vacancies/mine — employer-authenticated, returns only own vacancies
         try:
-            data = await api_request(provider_name, "GET", "/vacancies", params={"manager_id": manager_id, "page": page, "per_page": per_page})
-            if isinstance(data, dict) and ("items" in data or "found" in data):
-                data["_source"] = f"vacancies?manager_id={manager_id}"
-                return data
-        except HTTPException as e:
-            errors.append({"path": f"/vacancies?manager_id={manager_id}", "error": str(e.detail)[:200]})
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.get(
+                    f"{base_url}/vacancies/mine",
+                    headers={"Authorization": f"Bearer {tokens['access_token']}", "HH-User-Agent": ua},
+                    params=params,
+                )
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and "items" in data:
+                    data["_source"] = f"{base_url}/vacancies/mine"
+                    return data
+            errors.append({"path": f"{base_url}/vacancies/mine", "status": response.status_code, "error": response.text[:200]})
+        except Exception as exc:
+            errors.append({"path": f"{base_url}/vacancies/mine", "error": str(exc)[:200]})
 
-    # Approach 3: /vacancies?manager_id=X&host=hh.kz (Kazakhstan regional)
-    if manager_id:
-        try:
-            data = await api_request(provider_name, "GET", "/vacancies", params={"manager_id": manager_id, "host": "hh.kz", "page": page, "per_page": per_page})
-            if isinstance(data, dict) and ("items" in data or "found" in data):
-                data["_source"] = f"vacancies?manager_id={manager_id}&host=hh.kz"
-                return data
-        except HTTPException as e:
-            errors.append({"path": f"/vacancies?manager_id={manager_id}&host=hh.kz", "error": str(e.detail)[:200]})
+        # /employers/{id}/vacancies/active and /employers/{id}/vacancies
+        if employer_id:
+            for ep in [f"/employers/{employer_id}/vacancies/active", f"/employers/{employer_id}/vacancies"]:
+                try:
+                    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                        response = await client.get(
+                            f"{base_url}{ep}",
+                            headers={"Authorization": f"Bearer {tokens['access_token']}", "HH-User-Agent": ua},
+                            params=params,
+                        )
+                    if response.status_code == 200:
+                        data = response.json()
+                        if isinstance(data, dict) and ("items" in data or "found" in data):
+                            data["_source"] = f"{base_url}{ep}"
+                            return data
+                    errors.append({"path": f"{base_url}{ep}", "status": response.status_code, "error": response.text[:200]})
+                except Exception as exc:
+                    errors.append({"path": f"{base_url}{ep}", "error": str(exc)[:200]})
 
-    # Approach 4: /employers/{id}/vacancies/active
-    if employer_id:
-        try:
-            data = await api_request(provider_name, "GET", f"/employers/{employer_id}/vacancies/active", params={"page": page, "per_page": per_page})
-            if isinstance(data, dict) and ("items" in data or "found" in data):
-                data["_source"] = f"employers/{employer_id}/vacancies/active"
-                return data
-        except HTTPException as e:
-            errors.append({"path": f"/employers/{employer_id}/vacancies/active", "error": str(e.detail)[:200]})
-
-    return {"ok": False, "message": "All vacancy endpoints returned errors", "tried": errors, "manager_id": manager_id, "employer_id": employer_id}
+    return {"ok": False, "message": "All vacancy endpoints returned errors", "tried": errors, "employer_id": employer_id}
 
 
 @app.get("/{provider_name}/negotiations")
