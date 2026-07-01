@@ -311,7 +311,12 @@ async def api_request_with_tokens(provider_name: str, tokens: Dict[str, Any], me
                 response = await client.request(method, f"{p['api']}{path}", headers=headers, **kwargs)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
-    return response.json()
+    if not response.content:
+        return {"ok": True, "status_code": response.status_code}
+    try:
+        return response.json()
+    except ValueError:
+        return {"ok": True, "status_code": response.status_code, "text": response.text[:500]}
 
 
 async def api_request(provider_name: str, method: str, path: str, **kwargs):
