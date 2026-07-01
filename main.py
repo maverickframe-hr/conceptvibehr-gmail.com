@@ -50,7 +50,7 @@ PROVIDERS = {
     },
 }
 
-app = FastAPI(title=APP_NAME, version="0.5.1")
+app = FastAPI(title=APP_NAME, version="0.6.0")
 
 
 def env(name: str, required: bool = True) -> Optional[str]:
@@ -629,3 +629,29 @@ async def hh_send_negotiation_message(nid: str, body: MessageBody):
 @app.post("/rabota/employer/negotiations/{nid}/messages")
 async def rabota_send_negotiation_message(nid: str, body: MessageBody):
     return await send_negotiation_message("rabota", nid=nid, body=body)
+
+
+class NegotiationActionBody(BaseModel):
+    action: str
+    message: Optional[str] = None
+
+
+@app.post("/{provider_name}/negotiations/{nid}/change_state")
+async def change_negotiation_state(provider_name: str, nid: str, body: NegotiationActionBody):
+    """Change the employer state of a response/negotiation.
+    action examples: discard_by_employer (reject), consider, phone_interview, interview,
+    assessment, offer, hired, discard_no_interaction, discard_vacancy_closed.
+    Calls hh API: PUT /negotiations/{action}/{nid}. Only call when user explicitly requests."""
+    provider(provider_name)
+    data = {"message": body.message} if body.message else None
+    return await api_request(provider_name, "PUT", f"/negotiations/{body.action}/{nid}", data=data)
+
+
+@app.post("/hh/employer/negotiations/{nid}/change_state")
+async def hh_change_negotiation_state(nid: str, body: NegotiationActionBody):
+    return await change_negotiation_state("hh", nid=nid, body=body)
+
+
+@app.post("/rabota/employer/negotiations/{nid}/change_state")
+async def rabota_change_negotiation_state(nid: str, body: NegotiationActionBody):
+    return await change_negotiation_state("rabota", nid=nid, body=body)
