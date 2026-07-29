@@ -10,6 +10,12 @@ from mcp.server.fastmcp import FastMCP
 BRIDGE = "https://maverickframe-hh-bridge.onrender.com"
 mcp = FastMCP("hr-bridge")
 
+# Employer ids по провайдерам (нужны, чтобы находить актуальные вакансии)
+DEFAULT_EMPLOYER_ID = {
+    "rabota": "772836",
+    "hh": "12669364",
+}
+
 # Допустимые статусы отклика (см. правило работы с рабочими сайтами)
 VALID_ACTIONS = {
     "discard_by_employer",      # Отказ
@@ -24,12 +30,50 @@ VALID_ACTIONS = {
 }
 
 
+def _fetch_vacancies(employer_id: str, provider: str) -> dict:
+    r = httpx.get(f"{BRIDGE}/{provider}/vacancies",
+                  params={"employer_id": employer_id}, timeout=30)
+    try:
+        return r.json()
+    except Exception:
+        return {"ok": False, "status_code": r.status_code, "text": r.text[:500]}
+
+
+def _latest_vacancy_id(provider: str) -> str | None:
+    """Newest open (non-archived) vacancy id for the default employer, or None."""
+    employer_id = DEFAULT_EMPLOYER_ID.get(provider)
+    if not employer_id:
+        return None
+    data = _fetch_vacancies(employer_id, provider)
+    items = data.get("items") if isinstance(data, dict) else None
+    if not items:
+        return None
+    open_items = [i for i in items if not i.get("archived")] or items
+    open_items.sort(key=lambda i: i.get("published_at") or "", reverse=True)
+    return open_items[0].get("id")
+
+
 @mcp.tool()
-def list_responses(vacancy_id: str = "134229811", page: int = 0, per_page: int = 20, provider: str = "rabota") -> dict:
-    """List candidate responses. Returns id (use as nid for send_message), resume_id, name."""
+def list_responses(vacancy_id: str = "", page: int = 0, per_page: int = 20, provider: str = "rabota") -> dict:
+    """List candidate responses. Returns id (use as nid for send_message), resume_id, name.
+
+    vacancy_id is optional: if omitted, the newest open vacancy of the default
+    employer is resolved automatically (so the tool never points at a dead
+    vacancy). Use list_vacancies to see all ids."""
+    if not vacancy_id:
+        vacancy_id = _latest_vacancy_id(provider)
+        if not vacancy_id:
+            return {"ok": False,
+                    "error": f"no open vacancies found for {provider}; pass vacancy_id explicitly"}
     r = httpx.get(f"{BRIDGE}/{provider}/responses_short",
                   params={"vacancy_id": vacancy_id, "page": page, "per_page": per_page}, timeout=30)
-    return r.json()
+    try:
+        data = r.json()
+    except Exception:
+        return {"ok": False, "status_code": r.status_code, "text": r.text[:500], "vacancy_id": vacancy_id}
+    if isinstance(data, dict):
+        data.setdefault("vacancy_id", vacancy_id)
+    return data
 
 @mcp.tool()
 def get_resume(resume_id: str, provider: str = "rabota") -> dict:
@@ -86,11 +130,14 @@ def send_telegram_message(chat_id: str, text: str, bot_token: str) -> dict:
     return r.json()
 
 @mcp.tool()
-def list_vacancies(employer_id: str, provider: str = "rabota") -> dict:
-    """List vacancies. Rabota employer_id=772836, HH employer_id=12669364."""
-    r = httpx.get(f"{BRIDGE}/{provider}/vacancies",
-                  params={"employer_id": employer_id}, timeout=30)
-    return r.json()
+def list_vacancies(employer_id: str = "", provider: str = "rabota") -> dict:
+    """List vacancies. employer_id is optional and defaults to
+    Rabota employer_id=772836 / HH employer_id=12669364."""
+    if not employer_id:
+        employer_id = DEFAULT_EMPLOYER_ID.get(provider, "")
+        if not employer_id:
+            return {"ok": False, "error": f"unknown provider '{provider}'; pass employer_id explicitly"}
+    return _fetch_vacancies(employer_id, provider)
 
 @mcp.tool()
 def get_me(provider: str = "rabota") -> dict:
@@ -100,9 +147,20 @@ def get_me(provider: str = "rabota") -> dict:
 
 @mcp.tool()
 def token_status(provider: str = "rabota") -> dict:
-    """Check OAuth token status."""
+    """Check OAuth token status: expires_at, is_expired, last_refresh_error."""
     r = httpx.get(f"{BRIDGE}/debug/{provider}/token_status", timeout=20)
     return r.json()
+
+@mcp.tool()
+def refresh_token(provider: str = "rabota") -> dict:
+    """Force an OAuth token refresh. Use when a call fails with token-expired.
+    If this returns ok=false, a full re-authorization is needed:
+    open {BRIDGE}/auth/{provider}/start in a browser logged in as the employer."""
+    r = httpx.post(f"{BRIDGE}/auth/{provider}/refresh", timeout=30)
+    try:
+        return r.json()
+    except Exception:
+        return {"ok": False, "status_code": r.status_code, "text": r.text[:500]}
 
 if __name__ == "__main__":
     mcp.run()
