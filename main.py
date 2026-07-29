@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional, Any, Dict
 from urllib.parse import urlencode, urlparse
@@ -17,6 +18,12 @@ LOG_LEVEL = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INF
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("maverickframe_hh_bridge")
 logger.setLevel(LOG_LEVEL)
+
+# Why the last refresh_tokens() call failed, per provider. Never contains secrets.
+LAST_REFRESH_ERROR: Dict[str, str] = {}
+
+# Safety margin (seconds) subtracted from expires_in when computing expires_at.
+TOKEN_EXPIRY_MARGIN = 300
 
 
 def token_store_url() -> Optional[str]:
@@ -74,6 +81,26 @@ def _safe_json(response: httpx.Response) -> Dict[str, Any]:
         return {"ok": False, "raw": data}
     except Exception:
         return {"ok": False, "text": response.text[:2000]}
+
+
+def _with_expires_at(tokens: Any) -> Any:
+    """Store an absolute expiry timestamp (with safety margin) when expires_in is usable."""
+    if not isinstance(tokens, dict):
+        return tokens
+    try:
+        tokens["expires_at"] = time.time() + int(tokens.get("expires_in")) - TOKEN_EXPIRY_MARGIN
+    except (TypeError, ValueError):
+        logger.warning("Token payload has no usable expires_in; expires_at not tracked")
+    return tokens
+
+
+def _expires_at_of(tokens: Any) -> Optional[float]:
+    if not isinstance(tokens, dict) or tokens.get("expires_at") is None:
+        return None
+    try:
+        return float(tokens.get("expires_at"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _token_summary(tokens: Any) -> Dict[str, Any]:
@@ -248,6 +275,7 @@ async def load_tokens_remote(provider_name: str) -> Optional[Dict[str, Any]]:
 
 async def save_tokens(provider_name: str, tokens: Dict[str, Any]) -> bool:
     provider(provider_name)
+    _with_expires_at(tokens)
     _cache_tokens_local(provider_name, tokens, "provider save")
     return await save_tokens_remote(provider_name, tokens)
 
@@ -270,32 +298,56 @@ async def load_tokens(provider_name: str) -> Dict[str, Any]:
 async def refresh_tokens(provider_name: str, tokens: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     refresh_token = tokens.get("refresh_token")
     if not refresh_token:
+        LAST_REFRESH_ERROR[provider_name] = "no refresh_token stored"
         return None
     p = provider(provider_name)
+    try:
+        client_id = env(p["client_id"])
+        client_secret = env(p["client_secret"])
+    except HTTPException as exc:
+        LAST_REFRESH_ERROR[provider_name] = f"config error: {exc.detail}"
+        logger.warning("Token refresh config error for %s: %s", provider_name, exc.detail)
+        return None
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "client_id": env(p["client_id"]),
-        "client_secret": env(p["client_secret"]),
+        "client_id": client_id,
+        "client_secret": client_secret,
     }
     headers = {"HH-User-Agent": env(p["user_agent"], required=False) or p["default_ua"]}
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.post(p["token"], data=data, headers=headers)
         if response.status_code >= 400:
+            LAST_REFRESH_ERROR[provider_name] = f"HTTP {response.status_code}: {response.text[:300]}"
+            logger.warning("Token refresh failed for %s: HTTP %s", provider_name, response.status_code)
             return None
         new_tokens = response.json()
+        if not isinstance(new_tokens, dict) or not new_tokens.get("access_token"):
+            LAST_REFRESH_ERROR[provider_name] = f"HTTP {response.status_code}: no access_token in token response"
+            return None
         if "refresh_token" not in new_tokens and refresh_token:
             new_tokens["refresh_token"] = refresh_token
         await save_tokens(provider_name, new_tokens)
+        LAST_REFRESH_ERROR.pop(provider_name, None)
         return new_tokens
     except Exception as exc:
         logger.exception("Token refresh error for %s: %s", provider_name, exc)
+        LAST_REFRESH_ERROR[provider_name] = f"exception: {type(exc).__name__}: {str(exc)[:300]}"
         return None
 
 
 async def api_request_with_tokens(provider_name: str, tokens: Dict[str, Any], method: str, path: str, **kwargs):
     p = provider(provider_name)
+    refresh_attempted = False
+    expires_at = _expires_at_of(tokens)
+    if expires_at is not None and time.time() >= expires_at:
+        refresh_attempted = True
+        proactive_tokens = await refresh_tokens(provider_name, tokens)
+        if proactive_tokens and proactive_tokens.get("access_token"):
+            tokens = proactive_tokens
+        else:
+            logger.warning("Proactive token refresh failed for %s: %s", provider_name, LAST_REFRESH_ERROR.get(provider_name))
     headers = kwargs.pop("headers", {})
     headers.update({
         "Authorization": f"Bearer {tokens['access_token']}",
@@ -304,11 +356,20 @@ async def api_request_with_tokens(provider_name: str, tokens: Dict[str, Any], me
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         response = await client.request(method, f"{p['api']}{path}", headers=headers, **kwargs)
     if response.status_code == 401:
+        refresh_attempted = True
         new_tokens = await refresh_tokens(provider_name, tokens)
         if new_tokens and new_tokens.get("access_token"):
             headers["Authorization"] = f"Bearer {new_tokens['access_token']}"
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
                 response = await client.request(method, f"{p['api']}{path}", headers=headers, **kwargs)
+    if response.status_code == 401 and refresh_attempted:
+        raise HTTPException(status_code=401, detail={
+            "error": f"{provider_name} authorization failed and the token refresh did not recover it.",
+            "provider": provider_name,
+            "api_response": response.text[:300],
+            "refresh_error": LAST_REFRESH_ERROR.get(provider_name),
+            "hint": f"Re-authorize at /auth/{provider_name}/start (or try POST /auth/{provider_name}/refresh first).",
+        })
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     if not response.content:
@@ -363,7 +424,7 @@ async def auth_callback(provider_name: str, code: str, state: Optional[str] = No
         response = await client.post(p["token"], data=data, headers=headers)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
-    tokens = response.json()
+    tokens = _with_expires_at(response.json())
     employer_info = None
     if provider_name == "hh" and state == "hh_employer":
         me_data = await api_request_with_tokens("hh", tokens, "GET", "/me")
@@ -373,6 +434,32 @@ async def auth_callback(provider_name: str, code: str, state: Optional[str] = No
     if employer_info:
         result["employer"] = employer_info
     return result
+
+
+@app.get("/auth/{provider_name}/refresh")
+@app.post("/auth/{provider_name}/refresh")
+async def auth_refresh(provider_name: str):
+    """Force a refresh_token exchange. Never returns token values themselves."""
+    provider(provider_name)
+    tokens = await load_tokens(provider_name)
+    new_tokens = await refresh_tokens(provider_name, tokens)
+    if new_tokens and new_tokens.get("access_token"):
+        return {
+            "ok": True,
+            "provider": provider_name,
+            "expires_at": new_tokens.get("expires_at"),
+            "expires_in": new_tokens.get("expires_in"),
+            "has_refresh_token": bool(new_tokens.get("refresh_token")),
+            "error": None,
+        }
+    return {
+        "ok": False,
+        "provider": provider_name,
+        "expires_at": tokens.get("expires_at"),
+        "has_refresh_token": bool(tokens.get("refresh_token")),
+        "error": LAST_REFRESH_ERROR.get(provider_name, "refresh failed"),
+        "hint": f"Re-authorize at /auth/{provider_name}/start",
+    }
 
 
 @app.get("/{provider_name}/me")
@@ -541,10 +628,33 @@ async def gmail_hh_emails(query: Optional[str] = None, max_results: int = 10, ne
 
 @app.get("/debug/{provider_name}/token_status")
 async def token_status(provider_name: str):
-    provider(provider_name)
-    local_exists = provider(provider_name)["token_file"].exists()
+    token_file = provider(provider_name)["token_file"]
+    local_exists = token_file.exists()
+    local_tokens = None
+    if local_exists:
+        try:
+            local_tokens = json.loads(token_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Could not read local token cache for %s: %s", provider_name, exc)
     remote_tokens = await load_tokens_remote(provider_name)
-    return {"ok": True, "provider": provider_name, "token_store_url_configured": bool(token_store_url()), "local_token_exists": local_exists, "remote_token_exists": bool(remote_tokens and remote_tokens.get("access_token"))}
+    tokens = local_tokens if isinstance(local_tokens, dict) and local_tokens.get("access_token") else remote_tokens
+    expires_at = _expires_at_of(tokens)
+    expires_in_seconds = None
+    is_expired = None
+    if expires_at is not None:
+        expires_in_seconds = int(expires_at - time.time())
+        is_expired = expires_in_seconds <= 0
+    return {
+        "ok": True,
+        "provider": provider_name,
+        "token_store_url_configured": bool(token_store_url()),
+        "local_token_exists": local_exists,
+        "remote_token_exists": bool(remote_tokens and remote_tokens.get("access_token")),
+        "expires_at": expires_at,
+        "expires_in_seconds": expires_in_seconds,
+        "is_expired": is_expired,
+        "last_refresh_error": LAST_REFRESH_ERROR.get(provider_name),
+    }
 
 
 @app.get("/debug/{provider_name}/remote_token")
