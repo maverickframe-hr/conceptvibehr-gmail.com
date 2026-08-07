@@ -569,20 +569,20 @@ async def hh_employer_negotiations(vacancy_id: str, page: int = 0, per_page: int
 
 
 @app.get("/{provider_name}/responses")
-async def responses(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20):
+async def responses(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20, collection: str = "response"):
     provider(provider_name)
-    return await api_request(provider_name, "GET", "/negotiations/response", params={"vacancy_id": vacancy_id, "page": page, "per_page": per_page})
+    return await api_request(provider_name, "GET", f"/negotiations/{collection}", params={"vacancy_id": vacancy_id, "page": page, "per_page": per_page})
 
 
 @app.get("/hh/employer/responses")
-async def hh_employer_responses(vacancy_id: str, page: int = 0, per_page: int = 20):
-    return await responses("hh", vacancy_id=vacancy_id, page=page, per_page=per_page)
+async def hh_employer_responses(vacancy_id: str, page: int = 0, per_page: int = 20, collection: str = "response"):
+    return await responses("hh", vacancy_id=vacancy_id, page=page, per_page=per_page, collection=collection)
 
 
 @app.get("/{provider_name}/responses_short")
-async def responses_short(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20):
+async def responses_short(provider_name: str, vacancy_id: str, page: int = 0, per_page: int = 20, collection: str = "response"):
     provider(provider_name)
-    data = await responses(provider_name, vacancy_id, page, per_page)
+    data = await responses(provider_name, vacancy_id, page, per_page, collection=collection)
     short_items = []
     for item in data.get("items", []):
         resume = item.get("resume") or {}
@@ -604,8 +604,8 @@ async def responses_short(provider_name: str, vacancy_id: str, page: int = 0, pe
 
 
 @app.get("/hh/employer/responses_short")
-async def hh_employer_responses_short(vacancy_id: str, page: int = 0, per_page: int = 20):
-    return await responses_short("hh", vacancy_id=vacancy_id, page=page, per_page=per_page)
+async def hh_employer_responses_short(vacancy_id: str, page: int = 0, per_page: int = 20, collection: str = "response"):
+    return await responses_short("hh", vacancy_id=vacancy_id, page=page, per_page=per_page, collection=collection)
 
 
 @app.get("/{provider_name}/resume/{resume_id}")
